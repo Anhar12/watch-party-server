@@ -30,6 +30,68 @@ async function startServer() {
     };
   });
 
+  app.get("/api/turn-credentials", async (_request, reply) => {
+    const turnKeyId = process.env.CLOUDFLARE_TURN_KEY_ID;
+    const turnApiToken = process.env.CLOUDFLARE_TURN_API_TOKEN;
+    const ttl = Math.min(
+      Math.max(Number(process.env.CLOUDFLARE_TURN_TTL) || 86400, 300),
+      172800,
+    );
+
+    if (!turnKeyId || !turnApiToken) {
+      reply.code(503);
+      return {
+        error: "Cloudflare TURN is not configured on the server",
+      };
+    }
+
+    try {
+      const response = await fetch(
+        `https://rtc.live.cloudflare.com/v1/turn/keys/${encodeURIComponent(
+          turnKeyId,
+        )}/credentials/generate-ice-servers`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${turnApiToken}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            ttl,
+          }),
+        },
+      );
+
+      const data = (await response.json()) as {
+        iceServers?: unknown;
+        errors?: unknown;
+      };
+
+      if (!response.ok || !Array.isArray(data.iceServers)) {
+        app.log.error(
+          { status: response.status, data },
+          "Cloudflare TURN credential request failed",
+        );
+
+        reply.code(502);
+        return {
+          error: "Unable to obtain TURN credentials",
+        };
+      }
+
+      return {
+        iceServers: data.iceServers,
+        expiresIn: ttl,
+      };
+    } catch (error) {
+      app.log.error(error, "Cloudflare TURN request failed");
+      reply.code(502);
+      return {
+        error: "Unable to obtain TURN credentials",
+      };
+    }
+  });
+
   io.on("connection", (socket) => {
     console.log(`Client connected: ${socket.id}`);
 
@@ -146,6 +208,8 @@ async function startServer() {
         target: string;
         offer: RTCSessionDescriptionInit;
       }) => {
+        if (!target) return;
+
         io.to(target).emit("webrtc-offer", {
           sender: socket.id,
           offer,
@@ -162,6 +226,8 @@ async function startServer() {
         target: string;
         answer: RTCSessionDescriptionInit;
       }) => {
+        if (!target) return;
+
         io.to(target).emit("webrtc-answer", {
           sender: socket.id,
           answer,
@@ -178,6 +244,8 @@ async function startServer() {
         target: string;
         candidate: RTCIceCandidateInit;
       }) => {
+        if (!target || !candidate) return;
+
         io.to(target).emit("webrtc-ice-candidate", {
           sender: socket.id,
           candidate,
